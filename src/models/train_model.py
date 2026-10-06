@@ -18,6 +18,22 @@ from tensorflow import keras
 import pickle
 import json
 
+class ProgressPercentCallback(tf.keras.callbacks.Callback):
+    """Imprime en terminal cuántas imágenes/muestras se han procesado y el % del epoch."""
+
+    def __init__(self, total_samples, batch_size, name="training"):
+        super().__init__()
+        self.total_samples = total_samples
+        self.batch_size = batch_size
+        self.name = name
+
+    def on_train_batch_end(self, batch, logs=None):
+        seen = min((batch + 1) * self.batch_size, self.total_samples)
+        pct = seen / self.total_samples * 100
+        print(f"\r[{self.name}] {seen}/{self.total_samples} muestras ({pct:.1f}%)", end="", flush=True)
+
+    def on_epoch_end(self, epoch, logs=None):
+        print()  # salto de línea al cerrar el epoch, para no pisar el resumen de Keras
 
 class TextLSTMModel:
     def __init__(self, max_words=10000, max_sequence_length=10):
@@ -70,6 +86,7 @@ class TextLSTMModel:
                 patience=3, restore_best_weights=True
             ),  # Arrête l'entraînement si la performance ne s'améliore pas
             TensorBoard(log_dir="logs"),  # Enregistre les journaux pour TensorBoard
+            ProgressPercentCallback(len(X_train), batch_size=32, name="LSTM texto"),
         ]
 
         self.model.fit(
@@ -151,6 +168,7 @@ class ImageVGG16Model:
                 patience=3, restore_best_weights=True
             ),  # Arrête l'entraînement si la performance ne s'améliore pas
             TensorBoard(log_dir="logs"),  # Enregistre les journaux pour TensorBoard
+            ProgressPercentCallback(train_generator.samples, batch_size=batch_size, name="VGG16 imagen"),
         ]
 
         self.model.fit(
