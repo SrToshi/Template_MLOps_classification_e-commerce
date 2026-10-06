@@ -96,3 +96,16 @@ target/
 
 # Artifacts
 # /models/
+
+# MLflow local store (the tracking server owns this, not Git)
+mlruns/
+mlflow.db
+
+# Model artifacts downloaded from the registry at serving time
+models/champion/
+
+# Evidently reports
+reports/drift/
+
+# DVC
+.dvc/cache/

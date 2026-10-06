@@ -1,0 +1,135 @@
+# Rakuten MLOps stack.
+#
+#   docker compose up -d --build
+#
+#   API        http://localhost:8000/docs
+#   Streamlit  http://localhost:8501
+#   MLflow     http://localhost:5000
+#   Prometheus http://localhost:9090
+#   Grafana    http://localhost:3000   (admin / admin)
+#
+# The split into services is not decoration. The MLflow server needs
+# SQLAlchemy and Alembic, which require a newer typing_extensions than
+# TensorFlow 2.13 allows; Evidently brings its own web framework. These
+# dependency sets genuinely cannot share one Python environment, so each
+# runs in its own image and they talk over HTTP and a shared volume.
+
+services:
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.16.2
+    container_name: rakuten-mlflow
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --artifacts-destination /mlflow/artifacts
+      --serve-artifacts
+      --host 0.0.0.0
+      --port 5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-store:/mlflow
+    healthcheck:
+      # The image has no curl; Python is guaranteed to be there.
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: rakuten-api
+    ports:
+      - "8000:8000"
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_EXPERIMENT: rakuten-classification
+      MLFLOW_MODEL_NAME: rakuten-fusion
+      RAKUTEN_DB_PATH: /app/data/rakuten.db
+      RAKUTEN_CHAMPION_DIR: /app/models/champion
+      RAKUTEN_MAX_PREDICT_ROWS: "200"
+    volumes:
+      # Data and images stay on the host: ~2.4 GB of JPEGs has no business
+      # inside an image.
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+    depends_on:
+      mlflow:
+        condition: service_healthy
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.streamlit
+    container_name: rakuten-streamlit
+    ports:
+      - "8501:8501"
+    environment:
+      # Service names inside the compose network; the Grafana and MLflow
+      # links are rendered for the browser, so they use localhost.
+      RAKUTEN_API_URL: http://api:8000
+      MLFLOW_UI_URL: http://localhost:5000
+      GRAFANA_URL: http://localhost:3000
+    depends_on:
+      - api
+
+  drift:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.drift
+    container_name: rakuten-drift
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_DRIFT_EXPERIMENT: rakuten-drift
+      RAKUTEN_DB_PATH: /app/data/rakuten.db
+      RAKUTEN_REPORTS_DIR: /app/reports/drift
+      DRIFT_INTERVAL_SECONDS: "3600"
+      DRIFT_CURRENT_LIMIT: "500"
+      # Uncomment to let a drifted dataset trigger a retraining run:
+      # DRIFT_RETRAIN_API_URL: http://api:8000
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+    depends_on:
+      mlflow:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: rakuten-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: rakuten-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  mlflow-store:
+  prometheus-data:
+  grafana-data:

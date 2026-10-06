@@ -6,7 +6,31 @@ from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
 import pickle
+import json
 import math
+
+
+def build_text_input(df):
+    """Assemble the text the model sees, from designation + description.
+
+    This exists as a shared function because training and inference used to
+    build that text differently: training concatenated designation with
+    description, while predict.py passed description alone and never looked
+    at designation. Rows with an empty description therefore reached the
+    model as an empty string, and every one of them got the same prediction
+    with identical confidence.
+
+    It also replaces the original `designation + str(description)`, where
+    str() on a pandas Series stringified the ENTIRE column and appended that
+    same blob to every row.
+    """
+    designation = (
+        df["designation"].fillna("") if "designation" in df.columns else ""
+    )
+    description = (
+        df["description"].fillna("") if "description" in df.columns else ""
+    )
+    return (designation + " " + description).str.strip()
 
 
 class DataImporter:
@@ -15,7 +39,7 @@ class DataImporter:
 
     def load_data(self):
         data = pd.read_csv(f"{self.filepath}/X_train_update.csv")
-        data["description"] = data["designation"] + str(data["description"])
+        data["description"] = build_text_input(data)
         data = data.drop(["Unnamed: 0", "designation"], axis=1)
 
         target = pd.read_csv(f"{self.filepath}/Y_train_CVw08PX.csv")
@@ -28,11 +52,22 @@ class DataImporter:
         with open("models/mapper.pkl", "wb") as fichier:
             pickle.dump(modalite_mapping, fichier)
 
+        # predict.py and api.py read mapper.json (index -> prdtypecode), which
+        # nothing ever regenerated: a retrained model would therefore decode its
+        # class indices with a stale mapping. Write it right here, beside the
+        # pickle, so the two can never drift apart.
+        with open("models/mapper.json", "w", encoding="utf-8") as fichier:
+            json.dump(
+                {str(index): str(code) for code, index in modalite_mapping.items()},
+                fichier,
+                indent=2,
+            )
+
         df = pd.concat([data, target], axis=1)
 
         return df
 
-    def split_train_test(self, df, samples_per_class=600):
+    def split_train_test(self, df, samples_per_class=600, val_samples_per_class=50):
 
         grouped_data = df.groupby("prdtypecode")
 
@@ -57,8 +92,6 @@ class DataImporter:
 
         y_test = X_test["prdtypecode"]
         X_test = X_test.drop(["prdtypecode"], axis=1)
-
-        val_samples_per_class = 50
 
         grouped_data_test = pd.concat([X_test, y_test], axis=1).groupby("prdtypecode")
 

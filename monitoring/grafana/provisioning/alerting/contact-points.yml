@@ -1,0 +1,30 @@
+apiVersion: 1
+
+# Grafana's built-in webhook integration, pointed at the API's training
+# endpoint. Grafana POSTs its own alert payload; the endpoint's request model
+# ignores unknown fields and falls back to its defaults, so the alert starts a
+# run without Grafana needing to know the training parameters.
+#
+# Note the consequence: an alert-triggered run uses the DEFAULT
+# samples_per_class (600), which is a multi-hour job. The endpoint serialises
+# runs behind a lock and answers 409 while one is in flight, so a flapping
+# alert cannot pile up several.
+
+contactPoints:
+  - orgId: 1
+    name: rakuten-retraining-webhook
+    receivers:
+      - uid: rakuten-retrain
+        type: webhook
+        settings:
+          url: http://api:8000/training/
+          httpMethod: POST
+        disableResolveMessage: true
+
+policies:
+  - orgId: 1
+    receiver: rakuten-retraining-webhook
+    group_by: ["alertname"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

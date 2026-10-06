@@ -1,0 +1,12 @@
+# Evidently drift job (batch).
+#
+# Separate from the API image on purpose: Evidently pulls litestar,
+# cryptography and its own uvicorn extras, a dependency tree that has no
+# business sitting next to the pinned TensorFlow stack.
+evidently==0.4.40
+pandas==2.0.3
+numpy==1.24.3
+scikit-learn==1.3.0
+mlflow-skinny==2.16.2
+databricks-sdk==0.40.0
+requests==2.32.3

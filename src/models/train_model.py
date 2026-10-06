@@ -13,7 +13,7 @@ from sklearn.utils import resample
 import numpy as np
 from tensorflow.keras.applications.vgg16 import preprocess_input
 from tensorflow.keras.preprocessing.image import img_to_array, load_img
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
 from tensorflow import keras
 import pickle
 import json
@@ -42,7 +42,7 @@ class TextLSTMModel:
         self.tokenizer = Tokenizer(num_words=max_words, oov_token="<OOV>")
         self.model = None
 
-    def preprocess_and_fit(self, X_train, y_train, X_val, y_val):
+    def preprocess_and_fit(self, X_train, y_train, X_val, y_val, epochs=1, batch_size=32):
         self.tokenizer.fit_on_texts(X_train["description"])
 
         tokenizer_config = self.tokenizer.to_json()
@@ -86,14 +86,14 @@ class TextLSTMModel:
                 patience=3, restore_best_weights=True
             ),  # Arrête l'entraînement si la performance ne s'améliore pas
             TensorBoard(log_dir="logs"),  # Enregistre les journaux pour TensorBoard
-            ProgressPercentCallback(len(X_train), batch_size=32, name="LSTM texto"),
+            ProgressPercentCallback(len(X_train), batch_size=batch_size, name="LSTM texto"),
         ]
 
-        self.model.fit(
+        history = self.model.fit(
             [train_padded_sequences],
             tf.keras.utils.to_categorical(y_train, num_classes=27),
-            epochs=1,
-            batch_size=32,
+            epochs=epochs,
+            batch_size=batch_size,
             validation_data=(
                 [val_padded_sequences],
                 tf.keras.utils.to_categorical(y_val, num_classes=27),
@@ -101,21 +101,27 @@ class TextLSTMModel:
             callbacks=lstm_callbacks,
         )
 
+        # Returned so training.py can log these to MLflow without
+        # re-reading TensorBoard event files.
+        return history.history
+
 
 class ImageVGG16Model:
     def __init__(self):
         self.model = None
 
-    def preprocess_and_fit(self, X_train, y_train, X_val, y_val):
-        # Paramètres
-        batch_size = 32
+    def preprocess_and_fit(self, X_train, y_train, X_val, y_val, epochs=1, batch_size=32):
         num_classes = 27
 
         df_train = pd.concat([X_train, y_train.astype(str)], axis=1)
         df_val = pd.concat([X_val, y_val.astype(str)], axis=1)
 
-        # Créer un générateur d'images pour le set d'entraînement
-        train_datagen = ImageDataGenerator()  # Normalisation des valeurs de pixel
+        # preprocessing_function is not optional: predict.py feeds images
+        # through vgg16.preprocess_input (mean subtraction + BGR). Training
+        # without it fed raw 0-255 pixels instead, so the network was trained
+        # and served on two different input distributions — which is why the
+        # blend search used to assign the image branch a weight of 0.0.
+        train_datagen = ImageDataGenerator(preprocessing_function=preprocess_input)
         train_generator = train_datagen.flow_from_dataframe(
             dataframe=df_train,
             x_col="image_path",
@@ -126,8 +132,9 @@ class ImageVGG16Model:
             shuffle=True,
         )
 
-        # Créer un générateur d'images pour le set de validation
-        val_datagen = ImageDataGenerator()  # Normalisation des valeurs de pixel
+        # Same preprocessing on the validation set, or its loss is not
+        # comparable with the training loss.
+        val_datagen = ImageDataGenerator(preprocessing_function=preprocess_input)
         val_generator = val_datagen.flow_from_dataframe(
             dataframe=df_val,
             x_col="image_path",
@@ -171,12 +178,14 @@ class ImageVGG16Model:
             ProgressPercentCallback(train_generator.samples, batch_size=batch_size, name="VGG16 imagen"),
         ]
 
-        self.model.fit(
+        history = self.model.fit(
             train_generator,
-            epochs=1,
+            epochs=epochs,
             validation_data=val_generator,
             callbacks=vgg_callbacks,
         )
+
+        return history.history
 
 
 class concatenate:
@@ -196,10 +205,8 @@ class concatenate:
     ):
         num_classes = 27
 
-        new_X_train = pd.DataFrame(columns=X_train.columns)
-        new_y_train = pd.DataFrame(
-            columns=[0]
-        )  # Créez la structure pour les étiquettes
+        X_parts = []
+        y_parts = []
 
         # Boucle à travers chaque classe
         for class_label in range(num_classes):
@@ -211,14 +218,18 @@ class concatenate:
                 indices, n_samples=new_samples_per_class, replace=False, random_state=42
             )
 
-            # Ajout des échantillons sous-échantillonnés et de leurs étiquettes aux DataFrames
-            new_X_train = pd.concat([new_X_train, X_train.loc[sampled_indices]])
-            new_y_train = pd.concat([new_y_train, y_train.loc[sampled_indices]])
+            # Ajout des échantillons sous-échantillonnés et de leurs étiquettes
+            X_parts.append(X_train.loc[sampled_indices])
+            y_parts.append(y_train.loc[sampled_indices])
 
         # Réinitialiser les index des DataFrames
-        new_X_train = new_X_train.reset_index(drop=True)
-        new_y_train = new_y_train.reset_index(drop=True)
-        new_y_train = new_y_train.values.reshape(1350).astype("int")
+        new_X_train = pd.concat(X_parts).reset_index(drop=True)
+        new_y_train = pd.concat(y_parts).reset_index(drop=True)
+        # Was hardcoded to 1350 (= 27 classes x 50 samples), which silently
+        # broke any other sample size. Derive it instead.
+        new_y_train = new_y_train.values.reshape(
+            num_classes * new_samples_per_class
+        ).astype("int")
 
         # Charger les modèles préalablement sauvegardés
         tokenizer = self.tokenizer
@@ -267,4 +278,28 @@ class concatenate:
                 best_accuracy = accuracy
                 best_weights = (lstm_weight, vgg16_weight)
 
-        return best_weights
+        return best_weights, best_accuracy
+
+    def evaluate(self, X, y, best_weights, samples_per_class=20):
+        """Score the weighted ensemble on held-out data.
+
+        optimize() searches the blend weights on a TRAIN subsample, so the
+        accuracy it reports is fitted on the same data and cannot be used to
+        compare one training run against another. This runs the chosen blend
+        over a validation subsample instead, and returns the metrics that
+        MLflow uses to decide champion vs challenger. Weighted F1 is the
+        Rakuten challenge's own metric and is the primary one.
+        """
+        lstm_proba, vgg16_proba, y_true = self.predict(
+            X, y, new_samples_per_class=samples_per_class
+        )
+        combined = best_weights[0] * lstm_proba + best_weights[1] * vgg16_proba
+        y_pred = np.argmax(combined, axis=1)
+
+        return {
+            "accuracy": float(accuracy_score(y_true, y_pred)),
+            "weighted_f1": float(
+                f1_score(y_true, y_pred, average="weighted", zero_division=0)
+            ),
+            "n_samples": int(len(y_true)),
+        }
