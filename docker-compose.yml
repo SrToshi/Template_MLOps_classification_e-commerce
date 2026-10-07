@@ -19,6 +19,14 @@ services:
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.16.2
     container_name: rakuten-mlflow
+    # `mlflow server` runs on gunicorn under the hood, whose default
+    # per-worker timeout is 30s. Streaming a large artifact (the VGG16
+    # weights, several MB) through the --serve-artifacts proxy on a
+    # resource-constrained host can take longer than that, so gunicorn
+    # kills the worker mid-transfer: the client sees a 500 injected into
+    # the middle of a chunked response. Observed directly: downloading
+    # champion artifacts failed at exactly the 30s mark, on the largest
+    # file, every time — hence --gunicorn-opts below.
     command: >
       mlflow server
       --backend-store-uri sqlite:////mlflow/mlflow.db
@@ -26,6 +34,7 @@ services:
       --serve-artifacts
       --host 0.0.0.0
       --port 5000
+      --gunicorn-opts "--timeout 300"
     ports:
       - "5000:5000"
     volumes:
