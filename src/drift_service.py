@@ -12,7 +12,9 @@ Airflow image: exactly the dependency pile-up that forced these services
 apart in the first place. So Airflow orchestrates and the services execute.
 The drift check runs where Evidently already lives, behind one endpoint.
 
-    POST /run       run a drift check, return the summary
+    POST /run       run a drift check, return the summary. The body is
+                    optional: with none, every field falls back to its
+                    default, so `curl -X POST .../run` works as typed.
     GET  /health    liveness
     GET  /latest    the most recent summary, without recomputing
 
@@ -63,12 +65,19 @@ def health():
 
 
 @app.post("/run")
-def run(request: DriftRequest):
+def run(request: DriftRequest = DriftRequest()):
     """Run one drift check and return its summary.
 
     `status: "skipped"` (not an error) means there was nothing to compare
     yet — no predictions have been served. The DAG treats that as a no-op
     rather than a failure, because an idle system is not a broken one.
+
+    The body is optional. Every field of DriftRequest already has a default,
+    so requiring the body contradicted the model: `curl -X POST .../run` —
+    the obvious thing to type, and what the README told people to type —
+    answered 422 complaining about a missing field that has a default. The
+    DAG always sends all three, so nothing automated ever hit this; only a
+    person at a terminal did, which is the worst place to find out.
     """
     try:
         summary = drift_detection.run_drift_check(

@@ -388,7 +388,7 @@ data.
 │   ├── data/                     one-time import scripts
 │   ├── features/build_features.py
 │   └── models/train_model.py
-├── tests/                        53 tests
+├── tests/                        56 tests
 └── docker-compose.yml
 ```
 
@@ -418,6 +418,10 @@ gate. They cover:
   endpoint a DAG calls must exist in the service that serves it. One test
   builds a real `DagBag` and skips where Airflow is absent — which is
   everywhere but its own image.
+- **The drift service's HTTP contract**: `POST /run` must accept an empty
+  body and fall back to its defaults. Every field has one, so requiring the
+  body contradicted the model — and only a person typing the obvious command
+  ever hit it, since the DAG always sends all three.
 - **The observe/act boundary**: no Grafana contact point may call the API's
   training endpoint, the superseded webhook stays explicitly deleted, and the
   drift alert keeps firing at the same threshold the DAG acts on. These guard
