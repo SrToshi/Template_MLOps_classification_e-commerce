@@ -378,6 +378,34 @@ def training_status():
     return TRAINING
 
 
+@app.post("/model/reload")
+def reload_model():
+    """Re-resolve the champion from the registry and load it.
+
+    The API picks up a new champion automatically in two cases: at startup,
+    and after a training run IT executed. Neither covers a run launched
+    outside the service — a developer running training.py directly, a
+    scheduled job, or a teammate promoting a version by hand in the MLflow
+    UI. Without this endpoint the only way to pick those up is restarting the
+    container, which reloads VGG16 from scratch and takes the service down
+    while it does.
+    """
+    previous = STATE["model_version"]
+    try:
+        state = load_model(force=True)
+    except Exception as exc:  # noqa: BLE001
+        MODEL_LOADED.set(0)
+        raise HTTPException(status_code=503, detail=f"Could not load a model: {exc}")
+
+    return {
+        "previous_version": previous,
+        "model_version": state["model_version"],
+        "model_source": state["model_source"],
+        "changed": previous != state["model_version"],
+        "loaded_at": state["loaded_at"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Introspection
 # ---------------------------------------------------------------------------

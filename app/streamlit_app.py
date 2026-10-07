@@ -22,6 +22,7 @@ import streamlit as st
 API_URL = os.getenv("RAKUTEN_API_URL", "http://127.0.0.1:8000").rstrip("/")
 MLFLOW_URL = os.getenv("MLFLOW_UI_URL", "http://127.0.0.1:5000")
 GRAFANA_URL = os.getenv("GRAFANA_URL", "http://127.0.0.1:3000")
+AIRFLOW_URL = os.getenv("AIRFLOW_URL", "http://127.0.0.1:8080")
 
 st.set_page_config(page_title="Rakuten MLOps", page_icon="📦", layout="wide")
 
@@ -110,9 +111,15 @@ def page_architecture():
 
             subgraph cluster_monitor {
                 label="Monitoring"; style=dashed; color="#a1a1aa";
-                drift [label="Evidently\\ndrift job (scheduled)"];
+                drift [label="Evidently drift service\\nPOST /run"];
                 prom [label="Prometheus"];
                 grafana [label="Grafana\\n2 dashboards"];
+            }
+
+            subgraph cluster_orch {
+                label="Orchestration"; style=dashed; color="#a1a1aa";
+                airflow [label="Airflow\\nrakuten_training\\nrakuten_drift_check",
+                         fillcolor="#e0e7ff"];
             }
 
             csv -> sqlite [label="one-time import"];
@@ -127,6 +134,8 @@ def page_architecture():
             api -> prom [label="/metrics"];
             prom -> grafana;
             grafana -> api [label="alert webhook\\n-> retrain"];
+            airflow -> drift [label="hourly check"];
+            airflow -> api [label="train + reload"];
         }
         """
     )
@@ -269,6 +278,25 @@ def page_model():
         f"live in the MLflow UI: [{MLFLOW_URL}]({MLFLOW_URL})"
     )
 
+    # Training launched outside the service — from a developer machine, a
+    # scheduled job, or a manual promotion in the MLflow UI — does not reach
+    # the API on its own. This asks it to re-resolve the champion without a
+    # restart.
+    if st.button("Reload champion from registry"):
+        result, error = api_post("/model/reload", {}, timeout=120)
+        if error:
+            st.error(error)
+        elif result["changed"]:
+            st.success(
+                f"Now serving version {result['model_version']} "
+                f"(was {result['previous_version'] or 'none'})."
+            )
+        else:
+            st.info(
+                f"Already serving version {result['model_version']} — the "
+                "registry has no newer champion."
+            )
+
     st.subheader("Trigger a training run")
     st.caption(
         "Returns immediately: training runs on a background thread, because a "
@@ -396,5 +424,8 @@ st.sidebar.divider()
 render_api_status()
 st.sidebar.divider()
 st.sidebar.caption(f"API: {API_URL}")
+st.sidebar.markdown(
+    f"[MLflow]({MLFLOW_URL}) · [Airflow]({AIRFLOW_URL}) · [Grafana]({GRAFANA_URL})"
+)
 
 PAGES[choice]()

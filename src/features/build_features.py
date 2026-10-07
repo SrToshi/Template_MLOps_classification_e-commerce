@@ -67,47 +67,65 @@ class DataImporter:
 
         return df
 
-    def split_train_test(self, df, samples_per_class=600, val_samples_per_class=50):
+    def split_train_test(
+        self,
+        df,
+        samples_per_class=600,
+        val_samples_per_class=50,
+        test_samples_per_class=None,
+    ):
+        """Split the dataset into three DISJOINT, class-balanced sets.
 
-        grouped_data = df.groupby("prdtypecode")
+        The original implementation drew the validation rows out of the test
+        set and never removed them, so validation was a subset of test. Any
+        metric reported on "test" was therefore reported on rows that had
+        already been used to fit the networks (both branches train with
+        validation_data=X_val and an EarlyStopping that watches it).
 
-        X_train_samples = []
-        X_test_samples = []
+        That matters here because the three sets have three different jobs:
 
-        for _, group in grouped_data:
-            samples = group.sample(n=samples_per_class, random_state=42)
-            X_train_samples.append(samples)
+          train : fit the text and image branches
+          val   : early stopping, and the search for the ensemble blend
+                  weights — both are model selection
+          test  : the single number that decides champion versus challenger,
+                  computed on rows no fitting decision has ever seen
 
-            remaining_samples = group.drop(samples.index)
-            X_test_samples.append(remaining_samples)
+        test_samples_per_class caps the test set. Each test row costs a VGG16
+        forward pass, so without a cap a small training run would spend most
+        of its time scoring the leftovers.
+        """
+        train_parts, val_parts, test_parts = [], [], []
 
-        X_train = pd.concat(X_train_samples)
-        X_test = pd.concat(X_test_samples)
+        for _, group in df.groupby("prdtypecode"):
+            train = group.sample(n=samples_per_class, random_state=42)
+            remaining = group.drop(train.index)
 
-        X_train = X_train.sample(frac=1, random_state=42).reset_index(drop=True)
-        X_test = X_test.sample(frac=1, random_state=42).reset_index(drop=True)
+            n_val = min(val_samples_per_class, len(remaining))
+            val = remaining.sample(n=n_val, random_state=42)
+            remaining = remaining.drop(val.index)
 
-        y_train = X_train["prdtypecode"]
-        X_train = X_train.drop(["prdtypecode"], axis=1)
+            if test_samples_per_class is not None:
+                n_test = min(test_samples_per_class, len(remaining))
+                remaining = remaining.sample(n=n_test, random_state=42)
 
-        y_test = X_test["prdtypecode"]
-        X_test = X_test.drop(["prdtypecode"], axis=1)
+            train_parts.append(train)
+            val_parts.append(val)
+            test_parts.append(remaining)
 
-        grouped_data_test = pd.concat([X_test, y_test], axis=1).groupby("prdtypecode")
+        def _shuffle_and_split(parts):
+            # Shuffled as one frame, then separated. Shuffling X and y
+            # independently happens to line up today because both calls draw
+            # the same permutation, but it only takes one differing row count
+            # for the labels to silently stop matching their features.
+            frame = pd.concat(parts).sample(frac=1, random_state=42)
+            frame = frame.reset_index(drop=True)
+            labels = frame["prdtypecode"]
+            features = frame.drop(["prdtypecode"], axis=1)
+            return features, labels
 
-        X_val_samples = []
-        y_val_samples = []
-
-        for _, group in grouped_data_test:
-            samples = group.sample(n=val_samples_per_class, random_state=42)
-            X_val_samples.append(samples[["description", "productid", "imageid"]])
-            y_val_samples.append(samples["prdtypecode"])
-
-        X_val = pd.concat(X_val_samples)
-        y_val = pd.concat(y_val_samples)
-
-        X_val = X_val.sample(frac=1, random_state=42).reset_index(drop=True)
-        y_val = y_val.sample(frac=1, random_state=42).reset_index(drop=True)
+        X_train, y_train = _shuffle_and_split(train_parts)
+        X_val, y_val = _shuffle_and_split(val_parts)
+        X_test, y_test = _shuffle_and_split(test_parts)
 
         return X_train, X_val, X_test, y_train, y_val, y_test
 

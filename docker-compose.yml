@@ -5,6 +5,7 @@
 #   API        http://localhost:8000/docs
 #   Streamlit  http://localhost:8501
 #   MLflow     http://localhost:5000
+#   Airflow    http://localhost:8080   (admin / admin)
 #   Prometheus http://localhost:9090
 #   Grafana    http://localhost:3000   (admin / admin)
 #
@@ -75,6 +76,7 @@ services:
       RAKUTEN_API_URL: http://api:8000
       MLFLOW_UI_URL: http://localhost:5000
       GRAFANA_URL: http://localhost:3000
+      AIRFLOW_URL: http://localhost:8080
     depends_on:
       - api
 
@@ -83,21 +85,56 @@ services:
       context: .
       dockerfile: docker/Dockerfile.drift
     container_name: rakuten-drift
+    ports:
+      - "8100:8100"
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_DRIFT_EXPERIMENT: rakuten-drift
       RAKUTEN_DB_PATH: /app/data/rakuten.db
       RAKUTEN_REPORTS_DIR: /app/reports/drift
-      DRIFT_INTERVAL_SECONDS: "3600"
-      DRIFT_CURRENT_LIMIT: "500"
-      # Uncomment to let a drifted dataset trigger a retraining run:
-      # DRIFT_RETRAIN_API_URL: http://api:8000
+      # Share of monitored columns above which the DAG retrains.
+      RAKUTEN_DRIFT_THRESHOLD: "0.5"
     volumes:
       - ./data:/app/data
       - ./reports:/app/reports
     depends_on:
       mlflow:
         condition: service_healthy
+
+  airflow:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.airflow
+    container_name: rakuten-airflow
+    ports:
+      - "8080:8080"
+    environment:
+      # Where the DAGs send their work. Airflow orchestrates over HTTP and
+      # computes nothing itself, so this image needs neither TensorFlow nor
+      # Evidently — see docker/Dockerfile.airflow.
+      RAKUTEN_API_URL: http://api:8000
+      RAKUTEN_DRIFT_URL: http://drift:8100
+      DRIFT_REFERENCE_LIMIT: "1000"
+      DRIFT_CURRENT_LIMIT: "500"
+      AIRFLOW_ADMIN_USER: admin
+      AIRFLOW_ADMIN_PASSWORD: admin
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
+      # The webserver's first boot syncs Flask-AppBuilder's permission tables
+      # (one-time cost — hundreds of inserts, logged as "Added Permission ...").
+      # On a two-core host running six other containers at once, that can
+      # outrun gunicorn's default 120s master timeout, which kills the
+      # container before it ever gets a chance to serve a page. Two fewer
+      # workers means two fewer processes competing for those same cores.
+      AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "300"
+      AIRFLOW__WEBSERVER__WORKERS: "2"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - airflow-data:/opt/airflow/logs
+    depends_on:
+      - api
+      - drift
 
   prometheus:
     image: prom/prometheus:v2.54.1
@@ -133,3 +170,4 @@ volumes:
   mlflow-store:
   prometheus-data:
   grafana-data:
+  airflow-data:

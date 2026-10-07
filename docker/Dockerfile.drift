@@ -2,16 +2,24 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements/drift.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY src/db.py src/drift_detection.py src/mlflow_utils.py ./src/
-COPY docker/drift-entrypoint.sh /usr/local/bin/drift-entrypoint.sh
-RUN chmod +x /usr/local/bin/drift-entrypoint.sh
+COPY src/db.py src/drift_detection.py src/drift_service.py src/mlflow_utils.py ./src/
 
 ENV PYTHONPATH=/app/src \
     PYTHONUNBUFFERED=1
 
-# Runs on a loop rather than under cron: one less moving part inside the
-# container, and the interval stays visible in docker-compose.
-ENTRYPOINT ["/usr/local/bin/drift-entrypoint.sh"]
+EXPOSE 8100
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS http://localhost:8100/health || exit 1
+
+# A service rather than a sleep loop: Airflow owns the schedule now, and a
+# DAG needs something it can call. The batch script is still runnable by hand
+# (python src/drift_detection.py) for a one-off check.
+CMD ["uvicorn", "drift_service:app", "--host", "0.0.0.0", "--port", "8100", "--app-dir", "src"]

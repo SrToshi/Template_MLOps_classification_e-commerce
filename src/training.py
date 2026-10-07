@@ -49,6 +49,26 @@ SERVING_ARTIFACTS = [
 ]
 
 
+def _clamp(name, requested, labels):
+    """Limit a per-class sample size to what the split actually contains.
+
+    concatenate.predict() samples without replacement, so asking for more
+    rows than a class holds raises. Clamping with a warning keeps a small
+    smoke run working instead of failing on an arithmetic detail.
+    """
+    available = int(labels.value_counts().min()) if len(labels) else 0
+    if requested > available:
+        logger.warning(
+            "%s=%d exceeds the %d rows per class available; using %d",
+            name,
+            requested,
+            available,
+            available,
+        )
+        return available
+    return requested
+
+
 def _write_best_weights(best_weights):
     """Persist the ensemble blend weights in BOTH formats.
 
@@ -87,6 +107,7 @@ def run_training(
     val_samples_per_class: int = 50,
     blend_samples_per_class: int = 50,
     eval_samples_per_class: int = 20,
+    test_samples_per_class: int = None,
     experiment_name: str = None,
     register: bool = True,
 ) -> dict:
@@ -103,6 +124,7 @@ def run_training(
         "val_samples_per_class": val_samples_per_class,
         "blend_samples_per_class": blend_samples_per_class,
         "eval_samples_per_class": eval_samples_per_class,
+        "test_samples_per_class": test_samples_per_class,
     }
     logger.info("Starting training run with %s", params)
 
@@ -113,20 +135,34 @@ def run_training(
         # --- data -------------------------------------------------------
         data_importer = DataImporter()
         df = data_importer.load_data()
-        X_train, X_val, _, y_train, y_val, _ = data_importer.split_train_test(
-            df,
-            samples_per_class=samples_per_class,
-            val_samples_per_class=val_samples_per_class,
+
+        # The test set is capped at the number of rows that will actually be
+        # scored. Preprocessing is not free — every row is lemmatised with
+        # NLTK — so there is no point preparing tens of thousands of rows the
+        # evaluation would then subsample away.
+        if test_samples_per_class is None:
+            test_samples_per_class = eval_samples_per_class
+
+        X_train, X_val, X_test, y_train, y_val, y_test = (
+            data_importer.split_train_test(
+                df,
+                samples_per_class=samples_per_class,
+                val_samples_per_class=val_samples_per_class,
+                test_samples_per_class=test_samples_per_class,
+            )
         )
 
         text_preprocessor = TextPreprocessor()
         image_preprocessor = ImagePreprocessor()
-        text_preprocessor.preprocess_text_in_df(X_train, columns=["description"])
-        text_preprocessor.preprocess_text_in_df(X_val, columns=["description"])
-        image_preprocessor.preprocess_images_in_df(X_train)
-        image_preprocessor.preprocess_images_in_df(X_val)
+        for frame in (X_train, X_val, X_test):
+            text_preprocessor.preprocess_text_in_df(frame, columns=["description"])
+            image_preprocessor.preprocess_images_in_df(frame)
 
-        metrics = {"train_rows": float(len(X_train)), "val_rows": float(len(X_val))}
+        metrics = {
+            "train_rows": float(len(X_train)),
+            "val_rows": float(len(X_val)),
+            "test_rows": float(len(X_test)),
+        }
 
         # --- text branch ------------------------------------------------
         logger.info("Training LSTM model")
@@ -152,26 +188,38 @@ def run_training(
         lstm = keras.models.load_model(f"{MODELS_DIR}/best_lstm_model.h5")
         vgg16 = keras.models.load_model(f"{MODELS_DIR}/best_vgg16_model.h5")
 
-        logger.info("Searching the optimal blend weights")
+        # The blend weights are a hyperparameter, so they are searched on
+        # VALIDATION. Searching them on training data — as this pipeline
+        # originally did — made the text branch look better than it is,
+        # because it memorises the training rows more readily than the image
+        # branch does, and the search handed it all the weight.
         model_concatenate = concatenate(tokenizer, lstm, vgg16)
-        lstm_proba, vgg16_proba, new_y_train = model_concatenate.predict(
-            X_train, y_train, new_samples_per_class=blend_samples_per_class
-        )
-        best_weights, train_accuracy = model_concatenate.optimize(
-            lstm_proba, vgg16_proba, new_y_train
-        )
-        metrics["ensemble_train_accuracy"] = float(train_accuracy)
-        logger.info("Best weights: %s (train accuracy %.4f)", best_weights, train_accuracy)
 
-        # Held-out scoring — this is what champion/challenger is decided on.
-        logger.info("Evaluating the ensemble on validation data")
-        val_scores = model_concatenate.evaluate(
-            X_val, y_val, best_weights, samples_per_class=eval_samples_per_class
+        blend_n = _clamp("blend_samples_per_class", blend_samples_per_class, y_val)
+        logger.info("Searching the blend weights on validation data")
+        lstm_proba, vgg16_proba, y_blend = model_concatenate.predict(
+            X_val, y_val, new_samples_per_class=blend_n
         )
-        metrics["ensemble_val_accuracy"] = val_scores["accuracy"]
-        metrics["ensemble_val_weighted_f1"] = val_scores["weighted_f1"]
-        metrics["ensemble_val_rows"] = float(val_scores["n_samples"])
-        logger.info("Validation: %s", val_scores)
+        best_weights, blend_accuracy = model_concatenate.optimize(
+            lstm_proba, vgg16_proba, y_blend
+        )
+        metrics["ensemble_blend_accuracy"] = float(blend_accuracy)
+        logger.info(
+            "Best weights: %s (validation accuracy %.4f)", best_weights, blend_accuracy
+        )
+
+        # TEST is scored last and only once. It is the only number promotion
+        # depends on, and no fitting decision — not the networks' early
+        # stopping, not the blend search — has seen these rows.
+        eval_n = _clamp("eval_samples_per_class", eval_samples_per_class, y_test)
+        logger.info("Scoring the ensemble on the held-out test set")
+        test_scores = model_concatenate.evaluate(
+            X_test, y_test, best_weights, samples_per_class=eval_n
+        )
+        metrics["ensemble_test_accuracy"] = test_scores["accuracy"]
+        metrics["ensemble_test_weighted_f1"] = test_scores["weighted_f1"]
+        metrics["ensemble_test_rows"] = float(test_scores["n_samples"])
+        logger.info("Test: %s", test_scores)
 
         # --- persist artifacts ------------------------------------------
         weights = _write_best_weights(best_weights)
@@ -228,6 +276,8 @@ def _start_mlflow_run(experiment_name, params):
         logger.info("MLflow disabled via MLFLOW_DISABLED")
         return None, None, None
 
+    # Starting the run is the part that may legitimately fail (no server, bad
+    # URI, no credentials). Only this is allowed to turn tracking off.
     try:
         import mlflow
 
@@ -237,14 +287,51 @@ def _start_mlflow_run(experiment_name, params):
             experiment_name or mlflow_utils.DEFAULT_EXPERIMENT
         )
         run = mlflow.start_run()
-        mlflow.log_params(params)
-        logger.info(
-            "MLflow run %s at %s", run.info.run_id, mlflow_utils.get_tracking_uri()
-        )
-        return run, mlflow, mlflow_utils
     except Exception as exc:  # noqa: BLE001
         logger.warning("MLflow unavailable (%s) — training continues untracked", exc)
         return None, None, None
+
+    logger.info(
+        "MLflow run %s at %s", run.info.run_id, mlflow_utils.get_tracking_uri()
+    )
+
+    # Everything below enriches the run. Each piece fails on its own and is
+    # reported as itself: an earlier version wrapped the whole block in one
+    # try, so a missing data_version module was reported as "MLflow
+    # unavailable" and silently cost a five-hour run its tracking — the run
+    # was created, then left orphaned with no params, metrics or model.
+    try:
+        mlflow.log_params(params)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not log parameters: %s", exc)
+
+    _tag_data_version(mlflow)
+
+    return run, mlflow, mlflow_utils
+
+
+def _tag_data_version(mlflow):
+    """Tag the run with the DVC hashes of the data it used.
+
+    Optional by design: DVC may not be set up, and that must not cost the run
+    its tracking.
+    """
+    try:
+        import data_version
+
+        tags = data_version.mlflow_tags()
+        if tags:
+            mlflow.set_tags(tags)
+            logger.info("Data version recorded: %s", tags)
+        else:
+            logger.info("No DVC pointers found — data version not recorded")
+    except ImportError:
+        logger.warning(
+            "src/data_version.py is missing — this run will not record which "
+            "data version produced it"
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not record the data version: %s", exc)
 
 
 def _log_metrics(mlflow, metrics):
@@ -306,13 +393,21 @@ def _parse_args():
         "--blend-samples-per-class",
         type=int,
         default=50,
-        help="Rows per class used to search the ensemble blend weights.",
+        help="Validation rows per class used to search the blend weights.",
     )
     parser.add_argument(
         "--eval-samples-per-class",
         type=int,
         default=20,
-        help="Validation rows per class used to score the ensemble (max 50).",
+        help="Test rows per class used to score the ensemble. This is the "
+        "number the champion/challenger decision rests on.",
+    )
+    parser.add_argument(
+        "--test-samples-per-class",
+        type=int,
+        default=None,
+        help="Size of the held-out test split. Defaults to "
+        "--eval-samples-per-class, since only that many rows get scored.",
     )
     parser.add_argument("--experiment", type=str, default=None)
     parser.add_argument(
@@ -333,6 +428,7 @@ if __name__ == "__main__":
         val_samples_per_class=args.val_samples_per_class,
         blend_samples_per_class=args.blend_samples_per_class,
         eval_samples_per_class=args.eval_samples_per_class,
+        test_samples_per_class=args.test_samples_per_class,
         experiment_name=args.experiment,
         register=not args.no_register,
     )

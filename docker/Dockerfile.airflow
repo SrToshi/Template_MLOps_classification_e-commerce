@@ -1,0 +1,24 @@
+FROM apache/airflow:2.10.5-python3.10
+
+# The DAGs only need an HTTP client, which the base image already has. This
+# image deliberately installs no TensorFlow, no Evidently and no MLflow
+# server: Airflow decides WHEN things run, the services decide HOW, and
+# keeping it that way is what stops this image from re-creating the
+# dependency conflict that split the project into services.
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY docker/airflow-entrypoint.sh /usr/local/bin/airflow-entrypoint.sh
+RUN chmod +x /usr/local/bin/airflow-entrypoint.sh
+
+USER airflow
+
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
+    CMD curl -fsS http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/airflow-entrypoint.sh"]

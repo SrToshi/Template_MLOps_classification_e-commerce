@@ -37,7 +37,15 @@ DEFAULT_EXPERIMENT = os.getenv("MLFLOW_EXPERIMENT", "rakuten-classification")
 REGISTERED_MODEL_NAME = os.getenv("MLFLOW_MODEL_NAME", "rakuten-fusion")
 
 # The metric that decides which model version is champion. Higher is better.
-PRIMARY_METRIC = "ensemble_val_weighted_f1"
+#
+# Scored on the held-out TEST split. It was previously computed on
+# validation, which both branches already used for early stopping and which
+# the blend search also used — so the deciding number came from rows that had
+# influenced fitting. Versions registered before that change carry the old
+# metric name and therefore have no comparable value; promote_if_better()
+# treats a missing champion metric as "nothing to lose" and promotes, which
+# is the right behaviour for the first run under the new definition.
+PRIMARY_METRIC = "ensemble_test_weighted_f1"
 
 CHAMPION = "champion"
 CHALLENGER = "challenger"
