@@ -112,7 +112,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(rate(rakuten_http_requests_total{status=~\"[45]..\"}[5m])) / clamp_min(sum(rate(rakuten_http_requests_total[5m])), 0.0001)",
+          "expr": "(sum(rate(rakuten_http_requests_total{status=~\"[45]..\"}[5m])) or vector(0)) / clamp_min(sum(rate(rakuten_http_requests_total[5m])), 0.0001)",
           "refId": "A"
         }
       ],
