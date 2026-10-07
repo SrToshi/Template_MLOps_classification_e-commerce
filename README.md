@@ -65,7 +65,6 @@ flowchart LR
     DRIFT -->|summary| DB
     API -->|/metrics| PROM
     PROM --> GRAF
-    GRAF -.->|alert webhook| API
     AF -->|POST /run, hourly| DRIFT
     AF -->|POST /training/ · /model/reload| API
 ```
@@ -277,11 +276,22 @@ moment the stack starts.
 Two alert rules, both provisioned:
 
 - **Drift above the retraining threshold** — more than half the monitored
-  columns drifted. Wired through Grafana's built-in webhook to the API's
-  training endpoint.
+  columns drifted.
 - **The drift monitor has gone quiet** — no report in 24 hours. This matters
   as much as the first: a monitoring job that stopped running looks exactly
   like a healthy system.
+
+Both inform; neither acts. The first one used to POST to the API's training
+endpoint through a Grafana webhook, which was the right design before there
+was an orchestrator — and the wrong one after. It meant two independent
+automatic triggers for the same retrain, on different schedules, one of them
+firing whether or not the DAGs were unpaused. Nothing in a started run said
+which trigger had started it. Airflow is the single automated path now; the
+alerts are what a person reads. See
+`monitoring/grafana/provisioning/alerting/contact-points.yml`, which deletes
+the old contact point explicitly, because Grafana's alerting provisioning is
+additive and a removed definition would otherwise keep firing from the
+`grafana-data` volume.
 
 ---
 
@@ -378,7 +388,7 @@ data.
 │   ├── data/                     one-time import scripts
 │   ├── features/build_features.py
 │   └── models/train_model.py
-├── tests/                        49 tests
+├── tests/                        53 tests
 └── docker-compose.yml
 ```
 
@@ -408,6 +418,11 @@ gate. They cover:
   endpoint a DAG calls must exist in the service that serves it. One test
   builds a real `DagBag` and skips where Airflow is absent — which is
   everywhere but its own image.
+- **The observe/act boundary**: no Grafana contact point may call the API's
+  training endpoint, the superseded webhook stays explicitly deleted, and the
+  drift alert keeps firing at the same threshold the DAG acts on. These guard
+  a silent regression: re-adding that webhook breaks nothing and restores a
+  second, invisible retrain trigger.
 
 ---
 

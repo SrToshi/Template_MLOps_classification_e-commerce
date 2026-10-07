@@ -3,6 +3,13 @@ apiVersion: 1
 # Two alerts: one on the model's inputs moving away from its training data,
 # one on the monitor itself going quiet. The second matters as much as the
 # first — a drift check that stopped running looks exactly like a healthy one.
+#
+# Both alerts inform; neither acts. Grafana used to retrain through a webhook
+# on the first one, which made it a second automatic trigger competing with
+# Airflow's hourly drift check — see contact-points.yml for why that was
+# removed. The threshold below is deliberately the same 0.5 that
+# `rakuten_drift_check` tests, so what a human sees firing here is the same
+# condition the DAG acts on, read from the same metric.
 
 groups:
   - orgId: 1
@@ -16,7 +23,9 @@ groups:
         for: 5m
         labels:
           severity: warning
-          action: retrain
+          # Airflow performs the retrain; this label records what the alert
+          # means, not something Grafana routes or acts on.
+          acted_on_by: airflow
         annotations:
           summary: >-
             More than half of the monitored columns have drifted. The products

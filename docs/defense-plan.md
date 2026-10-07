@@ -91,8 +91,12 @@ training and serving, none of which raised an error:
   because live predictions have no labels. Say so before anyone asks.
 - Two alerts, and explain the second one: a drift monitor that stopped
   running looks exactly like a healthy system, so its silence is itself an
-  alert. The first is wired to the training endpoint through Grafana's
-  webhook.
+  alert.
+- Both alerts inform; neither acts. Worth saying out loud, because it is a
+  decision rather than an omission: the drift alert used to retrain through a
+  Grafana webhook, from before Airflow existed. Keeping both would have meant
+  two automatic triggers for one action, on different schedules, with nothing
+  in a started run to say which one started it. One orchestrator, one path.
 
 ---
 
@@ -151,6 +155,18 @@ false; when it is true, `TriggerDagRunOperator` starts `rakuten_training`,
 which retrains, lets the registry decide whether the new version is better,
 and reloads the API only if it is. That is the full loop, and no step in it
 is a person.
+
+**"You have alerts on drift. Why don't they trigger the retrain?"**
+They did, until Airflow existed. A Grafana webhook posted to `/training/`
+when the drift alert fired — a reasonable design when there was no
+orchestrator. Once `rakuten_drift_check` was running hourly, that webhook
+became a second automatic trigger for the same action, on a different
+schedule, firing whether or not the DAGs were unpaused. The `/training/`
+lock kept them from overlapping, which hid the ambiguity rather than
+removing it: when a run started, nothing recorded which of the two had
+started it. The alert rules still exist and still use the same 0.5 threshold
+the DAG tests, so a person sees exactly the condition the orchestrator acts
+on. Alerts inform, Airflow acts.
 
 **"Why SQLite?"**
 It fits a single-node deployment and a database that is read far more than

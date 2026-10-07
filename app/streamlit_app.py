@@ -133,7 +133,6 @@ def page_architecture():
             drift -> sqlite [label="summary"];
             api -> prom [label="/metrics"];
             prom -> grafana;
-            grafana -> api [label="alert webhook\\n-> retrain"];
             airflow -> drift [label="hourly check"];
             airflow -> api [label="train + reload"];
         }
