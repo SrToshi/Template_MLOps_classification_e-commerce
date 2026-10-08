@@ -78,8 +78,21 @@ target/
 # Jupyter NB Checkpoints
 .ipynb_checkpoints/
 
-# exclude data from source control by default
-/data/
+# exclude data from source control by default — except the DVC pointers.
+#
+# The .dvc files are a few hundred bytes each and they ARE the record of which
+# data version a training run used: without them in the repository, a teammate
+# who clones has nothing to `dvc pull` with, and the hashes in MLflow point at
+# nothing they can retrieve.
+#
+# Four lines rather than one, because git cannot re-include a file whose parent
+# directory is excluded. `/data/` plus `!data/preprocessed/*.dvc` silently does
+# nothing: the negation never gets a chance to match. Each level has to be
+# re-included on the way down.
+/data/*
+!/data/preprocessed/
+/data/preprocessed/*
+!/data/preprocessed/*.dvc
 
 # Mac OS-specific storage files
 .DS_Store
@@ -107,5 +120,20 @@ models/champion/
 # Evidently reports
 reports/drift/
 
-# DVC
+# DVC, initialised with --no-scm (see scripts/setup_dvc.sh).
+#
+# That flag is what the brief asks for, and it has a consequence worth
+# knowing: with --no-scm, DVC does NOT write the .gitignore files it
+# normally drops beside its cache and its tracked data. Nothing here is
+# automatic, so these entries are hand-written.
+#
+# The cache holds a full copy of every tracked file — adding the training
+# images would put ~2.4 GB in it. The .dvc pointer files themselves are
+# small, but they live under /data/, which is already ignored above.
 .dvc/cache/
+.dvc/tmp/
+
+# The DVC tooling lives in its own environment: dvc 3.x upgrades
+# typing_extensions past the < 4.6 that TensorFlow 2.13 pins, so it must
+# never share the training environment.
+.venv-dvc/
