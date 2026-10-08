@@ -133,6 +133,12 @@ reports/drift/
 .dvc/cache/
 .dvc/tmp/
 
+# A remote's credentials. `dvc remote modify --local` writes the token here in
+# plain text, which is exactly why it is a separate file from .dvc/config —
+# and exactly why it must never be committed. With git, `dvc init` would have
+# written this ignore itself; with --no-scm it writes nothing, so it is here.
+.dvc/config.local
+
 # The DVC tooling lives in its own environment: dvc 3.x upgrades
 # typing_extensions past the < 4.6 that TensorFlow 2.13 pins, so it must
 # never share the training environment.
