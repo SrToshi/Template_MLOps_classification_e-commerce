@@ -16,8 +16,12 @@ ENV PYTHONPATH=/app/src \
 
 EXPOSE 8100
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://localhost:8100/health || exit 1
+# 127.0.0.1 rather than localhost: the server listens on IPv4 only, and a
+# host that resolves localhost to ::1 first would be refused instantly.
+# This service is light and was never marked unhealthy, but there is no
+# reason to leave the same trap armed in one of the four images.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=4 \
+    CMD curl -fsS http://127.0.0.1:8100/health || exit 1
 
 # A service rather than a sleep loop: Airflow owns the schedule now, and a
 # DAG needs something it can call. The batch script is still runnable by hand

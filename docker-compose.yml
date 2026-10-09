@@ -9,16 +9,34 @@
 #   Prometheus http://localhost:9090
 #   Grafana    http://localhost:3000   (admin / admin)
 #
+# On a host where `localhost` resolves to the IPv6 ::1 before the IPv4
+# 127.0.0.1 — the default on Windows — one of these can answer nothing while
+# the container is perfectly healthy, because the server inside listens on
+# IPv4 only. Substituting 127.0.0.1 in the URL is the whole fix. Observed on
+# port 5000 and nowhere else, which is why it is a note and not a change.
+#
 # The split into services is not decoration. The MLflow server needs
 # SQLAlchemy and Alembic, which require a newer typing_extensions than
 # TensorFlow 2.13 allows; Evidently brings its own web framework. These
 # dependency sets genuinely cannot share one Python environment, so each
 # runs in its own image and they talk over HTTP and a shared volume.
 
+# Docker's default json-file driver does not rotate. A training run logs a
+# Keras progress bar — one line per refresh, tens of thousands of lines an
+# hour — straight into it, and the file grows until the disk is full. Nothing
+# warns you; the stack simply stops being able to write. Capped here.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.16.2
     container_name: rakuten-mlflow
+    logging: *default-logging
+    restart: unless-stopped
     # `mlflow server` runs on gunicorn under the hood, whose default
     # per-worker timeout is 30s. Streaming a large artifact (the VGG16
     # weights, several MB) through the --serve-artifacts proxy on a
@@ -42,17 +60,19 @@ services:
     healthcheck:
       # The image has no curl; Python is guaranteed to be there.
       test: ["CMD", "python", "-c",
-             "import urllib.request;urllib.request.urlopen('http://localhost:5000/health')"]
+             "import urllib.request;urllib.request.urlopen('http://127.0.0.1:5000/health')"]
       interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      timeout: 15s
+      retries: 6
+      start_period: 60s
 
   api:
     build:
       context: .
       dockerfile: docker/Dockerfile.api
     container_name: rakuten-api
+    logging: *default-logging
+    restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
@@ -77,6 +97,8 @@ services:
       context: .
       dockerfile: docker/Dockerfile.streamlit
     container_name: rakuten-streamlit
+    logging: *default-logging
+    restart: unless-stopped
     ports:
       - "8501:8501"
     environment:
@@ -94,6 +116,8 @@ services:
       context: .
       dockerfile: docker/Dockerfile.drift
     container_name: rakuten-drift
+    logging: *default-logging
+    restart: unless-stopped
     ports:
       - "8100:8100"
     environment:
@@ -115,6 +139,8 @@ services:
       context: .
       dockerfile: docker/Dockerfile.airflow
     container_name: rakuten-airflow
+    logging: *default-logging
+    restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
@@ -127,20 +153,35 @@ services:
       DRIFT_CURRENT_LIMIT: "500"
       AIRFLOW_ADMIN_USER: admin
       AIRFLOW_ADMIN_PASSWORD: admin
+      # Keep the metadata database on a volume, not in the container. See
+      # docker/Dockerfile.airflow for what is lost otherwise.
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/db/airflow.db
       AIRFLOW__CORE__EXECUTOR: SequentialExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
       # The webserver's first boot syncs Flask-AppBuilder's permission tables
       # (one-time cost — hundreds of inserts, logged as "Added Permission ...").
       # On a two-core host running six other containers at once, that can
-      # outrun gunicorn's default 120s master timeout, which kills the
-      # container before it ever gets a chance to serve a page. Two fewer
-      # workers means two fewer processes competing for those same cores.
-      AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "300"
-      AIRFLOW__WEBSERVER__WORKERS: "2"
+      # outrun gunicorn's master timeout, which kills the container before it
+      # ever gets a chance to serve a page. Fewer workers means fewer
+      # processes competing for those same cores.
+      #
+      # 300 was the first attempt and was not enough. With a retrain running
+      # inside the api container, the host was starved badly enough that the
+      # scheduler logged "Heartbeat recovered after 41.33 seconds" and the
+      # webserver then exited 1 with "No response from gunicorn master within
+      # 300 seconds". Not an Airflow bug and not memory (OOMKilled was false):
+      # the supervisor gave up on a master that was merely waiting for CPU.
+      # 900 buys enough room for the worst case observed.
+      AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "900"
+      # One worker, not two. The SequentialExecutor runs one task at a time
+      # and the UI has a single viewer, so the second worker bought nothing
+      # and doubled the boot work on the scarcest resource.
+      AIRFLOW__WEBSERVER__WORKERS: "1"
     volumes:
       - ./airflow/dags:/opt/airflow/dags:ro
       - airflow-data:/opt/airflow/logs
+      - airflow-db:/opt/airflow/db
     depends_on:
       - api
       - drift
@@ -148,6 +189,8 @@ services:
   prometheus:
     image: prom/prometheus:v2.54.1
     container_name: rakuten-prometheus
+    logging: *default-logging
+    restart: unless-stopped
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=15d
@@ -162,6 +205,8 @@ services:
   grafana:
     image: grafana/grafana:11.2.0
     container_name: rakuten-grafana
+    logging: *default-logging
+    restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
@@ -177,6 +222,7 @@ services:
 
 volumes:
   mlflow-store:
+  airflow-db:
   prometheus-data:
   grafana-data:
   airflow-data:

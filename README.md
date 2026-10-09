@@ -106,6 +106,13 @@ docker compose up -d --build
 | Prometheus | <http://localhost:9090> |
 | Grafana | <http://localhost:3000> (`admin` / `admin`) |
 
+If one of those answers nothing while `docker compose ps` shows the service
+healthy, try `127.0.0.1` in place of `localhost`. Where the host resolves
+`localhost` to the IPv6 `::1` before the IPv4 `127.0.0.1` — the default on
+Windows — the request can fail against a server that is listening, because
+the server inside the container is bound to IPv4. Swapping the address in
+the URL is the whole fix; nothing in the stack needs changing.
+
 The dataset is mounted from the host rather than baked into the images:
 2.4 GB of JPEGs has no business inside a container image.
 
