@@ -23,6 +23,7 @@ import logging
 import os
 import pickle
 import shutil
+import sys
 import tempfile
 
 import tensorflow as tf
@@ -418,8 +419,47 @@ def _parse_args():
     return parser.parse_args()
 
 
+def _report_tracking_destination():
+    """Say where this run will be recorded, before it starts.
+
+    run_training() works with or without a tracking server, and which one it
+    uses is decided by an environment variable rather than by a flag — so
+    from a terminal there is nothing to see. The two destinations are not
+    interchangeable: the file store belongs to this checkout, while every
+    service in the stack reads the tracking server. A run sent to the wrong
+    one finishes successfully, registers a model version, prints its metrics,
+    and is then invisible to the API. A failure with no error attached to it
+    is the expensive kind, so this prints the destination either way.
+
+    It does not refuse to run. Training against the file store is the
+    supported way to experiment without standing up a server, and it is why
+    the default exists (see mlflow_utils.get_tracking_uri).
+    """
+    import mlflow_utils
+
+    print(f"[training] MLflow tracking: {mlflow_utils.get_tracking_uri()}")
+    if os.getenv("MLFLOW_TRACKING_URI"):
+        return
+
+    print(
+        "[training] MLFLOW_TRACKING_URI is not set, so this run goes to a local\n"
+        "[training] file store. The stack's services read the tracking server, so\n"
+        "[training] they will not see the model this run registers.\n"
+        "[training]\n"
+        "[training] To record it where they can:\n"
+        "[training]     set MLFLOW_TRACKING_URI=http://127.0.0.1:5000     (Windows)\n"
+        "[training]     export MLFLOW_TRACKING_URI=http://127.0.0.1:5000  (Linux/macOS)\n"
+        "[training]\n"
+        "[training] Or train through the API, which is already configured and\n"
+        "[training] reloads the champion when the run finishes:\n"
+        "[training]     curl -X POST http://127.0.0.1:8000/training/",
+        file=sys.stderr,
+    )
+
+
 if __name__ == "__main__":
     args = _parse_args()
+    _report_tracking_destination()
     outcome = run_training(
         epochs_lstm=args.epochs_lstm,
         epochs_vgg=args.epochs_vgg,

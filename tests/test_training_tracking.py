@@ -112,3 +112,63 @@ def test_every_module_training_imports_is_present():
         if not os.path.exists(os.path.join(SRC, f"{module}.py"))
     }
     assert not missing, f"training.py imports modules that are not present: {missing}"
+
+
+def _main_block_calls():
+    """Names of the functions called directly in __main__, in order."""
+    tree = ast.parse(_training_source())
+    main = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Compare)
+            and getattr(node.test.left, "id", None) == "__name__"
+        ),
+        None,
+    )
+    assert main is not None, "training.py has no __main__ block"
+
+    names = []
+    for node in main.body:
+        call = None
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            call = node.value
+        if call is not None and isinstance(call.func, ast.Name):
+            names.append(call.func.id)
+    return names
+
+
+def test_entry_point_reports_where_the_run_goes():
+    """The CLI must name its tracking destination before training starts.
+
+    get_tracking_uri() falls back to a local file store when
+    MLFLOW_TRACKING_URI is unset. That default is deliberate, but from a
+    terminal the choice is invisible: the run succeeds, registers a version,
+    and the services never see it. The entry point has to say which
+    destination it picked, and it has to say so before the hours of work.
+    """
+    calls = _main_block_calls()
+
+    assert "_report_tracking_destination" in calls, (
+        "__main__ never reports the tracking destination; a run can go to the "
+        "file store with nothing on screen saying so"
+    )
+    assert calls.index("_report_tracking_destination") < calls.index(
+        "run_training"
+    ), "the destination must be reported before training starts, not after"
+
+
+def test_the_report_names_the_variable_and_both_remedies():
+    """A warning that does not say what to do is just noise."""
+    body = ast.get_source_segment(
+        _training_source(), _function("_report_tracking_destination")
+    )
+
+    assert "MLFLOW_TRACKING_URI" in body, "the report must name the variable"
+    assert "/training/" in body, (
+        "the report must point at the API endpoint, which is the path that "
+        "needs no variable at all"
+    )

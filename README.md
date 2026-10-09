@@ -145,6 +145,27 @@ python src/training.py --samples-per-class 15 --val-samples-per-class 10 \
 python src/training.py
 ```
 
+A run started this way records to a local file store unless
+`MLFLOW_TRACKING_URI` points at the tracking server, and the services read
+the server — so a model trained here is not one the API can serve. The
+script prints its destination before it starts. To produce a champion the
+stack will actually use, either set the variable first:
+
+```bash
+export MLFLOW_TRACKING_URI=http://127.0.0.1:5000   # Windows: set MLFLOW_...
+```
+
+or train through the API, which is already configured, needs no Python
+environment on the host, and reloads the champion itself when the run ends:
+
+```bash
+curl -X POST http://127.0.0.1:8000/training/ \
+     -H "Content-Type: application/json" \
+     -d '{"samples_per_class": 15, "val_samples_per_class": 10,
+          "blend_samples_per_class": 10, "eval_samples_per_class": 10}'
+curl -s http://127.0.0.1:8000/training/status
+```
+
 ---
 
 ## How a model reaches production
